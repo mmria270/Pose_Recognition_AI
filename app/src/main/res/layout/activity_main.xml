@@ -7,15 +7,26 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <!-- 相机预览 -->
+    <!-- 相机预览层 -->
     <androidx.camera.view.PreviewView
         android:id="@+id/previewView"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/bottomPanel"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 骨骼叠加层：完全覆盖在 PreviewView 上方 -->
+    <com.example.aipose.SkeletonOverlayView
+        android:id="@+id/skeletonOverlayView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@android:color/transparent"
+        app:layout_constraintTop_toTopOf="@id/previewView"
+        app:layout_constraintBottom_toBottomOf="@id/previewView"
+        app:layout_constraintStart_toStartOf="@id/previewView"
+        app:layout_constraintEnd_toEndOf="@id/previewView" />
 
     <!-- 顶部动作提示卡片 -->
     <com.google.android.material.card.MaterialCardView
@@ -98,15 +109,18 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 底部按钮区域 -->
+    <!-- 底部控制面板 -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/bottomPanel"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginBottom="40dp"
         android:orientation="horizontal"
         android:gravity="center"
         android:paddingHorizontal="16dp"
-        app:layout_constraintBottom_toBottomOf="parent">
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
 
         <!-- 切换摄像头按钮 -->
         <com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -156,7 +170,7 @@
         android:paddingHorizontal="12dp"
         android:paddingVertical="6dp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/captureButton"
+        app:layout_constraintBottom_toTopOf="@id/bottomPanel"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

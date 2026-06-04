@@ -4,8 +4,12 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.PointF;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
@@ -19,6 +23,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.ImageProxy;
@@ -39,7 +44,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -83,6 +91,39 @@ public class MainActivity extends AppCompatActivity {
     private List<String> actionList = new ArrayList<>();
     private int currentActionIndex = 0;
 
+    // 成员变量（添加到已有变量后面）
+    private SkeletonOverlayView skeletonOverlayView;
+    private ImageAnalysis imageAnalysis;         // ★ 补上缺失的声明
+    private volatile boolean isAnalyzing = false; // ★ 实时帧传输锁
+    private long lastAnalyzeTime = 0;             // ★ 上次分析时间戳
+
+    private int passCount = 0;  // 累计通关次数
+    private List<Sticker> unlockedStickers = new ArrayList<>();
+    private Map<String, Bitmap> stickerBitmaps = new HashMap<>();
+    private StickerManager stickerManager;
+    // 贴纸配置（关卡数 → 贴纸）
+    private static final Map<Integer, StickerConfig> STICKER_UNLOCK_CONFIG = new HashMap<>();
+    static {
+        // 通关2关解锁猫耳朵（贴在头上）
+        STICKER_UNLOCK_CONFIG.put(2, new StickerConfig("cat_ears", "head"));
+        // 通关4关解锁胡子（贴在鼻子附近）
+        STICKER_UNLOCK_CONFIG.put(4, new StickerConfig("mustache", "nose"));
+        // 通关6关解锁眼镜（贴在眼睛）
+        STICKER_UNLOCK_CONFIG.put(6, new StickerConfig("glasses", "nose"));
+        // 通关8关解锁皇冠（贴在头顶）
+        STICKER_UNLOCK_CONFIG.put(8, new StickerConfig("crown", "head"));
+        // 通关10关解锁爱心（贴在胸口）
+        STICKER_UNLOCK_CONFIG.put(10, new StickerConfig("heart", "left_shoulder"));
+    }
+    static class StickerConfig {
+        String name;
+        String attachJoint;
+        StickerConfig(String name, String attachJoint) {
+            this.name = name;
+            this.attachJoint = attachJoint;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -95,6 +136,8 @@ public class MainActivity extends AppCompatActivity {
         captureButton = findViewById(R.id.captureButton);
         switchCameraButton = findViewById(R.id.switchCameraButton);
         nextActionButton = findViewById(R.id.nextActionButton);  // 新增
+        // 在 onCreate 中，现有 findViewById 那些行后面加一行：
+        skeletonOverlayView = findViewById(R.id.skeletonOverlayView);
 
         // 初始化 HTTP 客户端
         okHttpClient = new OkHttpClient.Builder()
@@ -108,6 +151,12 @@ public class MainActivity extends AppCompatActivity {
         // 获取动作列表
         fetchActionList();
 
+        // 初始化贴纸系统
+        initStickers();
+
+        // 初始化贴纸管理器
+        stickerManager = new StickerManager(this);
+
         // 按钮点击事件
         captureButton.setOnClickListener(v -> takePhotoAndUpload());
         switchCameraButton.setOnClickListener(v -> switchCamera());
@@ -120,6 +169,67 @@ public class MainActivity extends AppCompatActivity {
             requestCameraPermission();
         }
     }
+    /**
+     * 初始化贴纸资源
+     */
+    private void initStickers() {
+        // 创建贴纸（实际项目中应从资源文件加载图片）
+        // 这里用颜色圆点模拟，你可以替换成真正的图片资源
+        createMockSticker("cat_ears", Color.parseColor("#FFA726"));
+        createMockSticker("mustache", Color.parseColor("#795548"));
+        createMockSticker("glasses", Color.parseColor("#42A5F5"));
+        createMockSticker("crown", Color.parseColor("#FFD700"));
+        createMockSticker("heart", Color.parseColor("#EF5350"));
+    }
+
+    private void createMockSticker(String name, int color) {
+        Bitmap bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint();
+        paint.setColor(color);
+        canvas.drawCircle(50, 50, 40, paint);
+        stickerBitmaps.put(name, bitmap);
+    }
+
+    /**
+     * 检查并解锁贴纸
+     */
+    private void checkAndUnlockStickers() {
+        for (Map.Entry<Integer, StickerConfig> entry : STICKER_UNLOCK_CONFIG.entrySet()) {
+            int requiredPass = entry.getKey();
+            StickerConfig config = entry.getValue();
+
+            // 通关数达到要求，且贴纸还未解锁
+            if (passCount >= requiredPass && !isStickerUnlocked(config.name)) {
+                Bitmap bmp = stickerBitmaps.get(config.name);
+                if (bmp != null) {
+                    Sticker sticker = new Sticker(config.name, bmp, requiredPass, config.attachJoint);
+                    unlockedStickers.add(sticker);
+                    skeletonOverlayView.addSticker(sticker);
+                    Toast.makeText(this, "🎁 解锁新贴纸：" + getStickerChineseName(config.name), Toast.LENGTH_LONG).show();
+                }
+            }
+        }
+    }
+
+    private boolean isStickerUnlocked(String name) {
+        for (Sticker s : unlockedStickers) {
+            if (s.getName().equals(name)) return true;
+        }
+        return false;
+    }
+
+    private String getStickerChineseName(String name) {
+        switch (name) {
+            case "cat_ears": return "猫耳朵";
+            case "mustache": return "小胡子";
+            case "glasses": return "酷眼镜";
+            case "crown": return "黄金皇冠";
+            case "heart": return "爱心特效";
+            default: return name;
+        }
+    }
+
 
     /**
      * 获取动作列表
@@ -155,6 +265,8 @@ public class MainActivity extends AppCompatActivity {
                             for (int i = 0; i < posesArray.length(); i++) {
                                 actionList.add(posesArray.getString(i));
                             }
+                            //打乱从后端获取的动作列表
+                            Collections.shuffle(actionList);
                         }
                     } catch (JSONException e) {
                         Log.e(TAG, "解析动作列表失败", e);
@@ -165,6 +277,8 @@ public class MainActivity extends AppCompatActivity {
                         actionList.add("Both Hands Up");
                         actionList.add("Squat");
                         actionList.add("T-Pose");
+                        //打乱默认动作列表
+                        Collections.shuffle(actionList);
                     }
                     updateActionDisplay();
                 });
@@ -207,9 +321,26 @@ public class MainActivity extends AppCompatActivity {
      */
     private void nextAction() {
         if (actionList.isEmpty()) return;
+
+        // 闯关成功，增加通关计数
+        passCount++;
+
+        // 检查并解锁新贴纸
+        List<Sticker> newStickers = stickerManager.checkAndUnlock(passCount);
+        for (Sticker sticker : newStickers) {
+            skeletonOverlayView.addSticker(sticker);
+            Toast.makeText(this, "🎁 解锁贴纸：" + sticker.getName(), Toast.LENGTH_LONG).show();
+        }
+
+        // 显示闯关成功提示
+        String message = "🎉 闯关成功！连续通关：" + passCount + "关";
+        if (stickerManager.getUnlockedStickers().size() > 0) {
+            message += "\n✨ 已获得 " + stickerManager.getUnlockedStickers().size() + " 个贴纸";
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+
         currentActionIndex = (currentActionIndex + 1) % actionList.size();
         updateActionDisplay();
-        Toast.makeText(this, "🎉 闯关成功！下一个动作：" + actionList.get(currentActionIndex), Toast.LENGTH_LONG).show();
     }
 
     /**
@@ -258,25 +389,143 @@ public class MainActivity extends AppCompatActivity {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
 
+                //1. 配置预览
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
+                //2. 配置拍照（保留原有功能）
                 imageCapture = new ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .build();
 
+                //3. 新增配置实时图像分析
+                imageAnalysis = new ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST) // 忙时自动丢帧
+                        .build();
+
+                imageAnalysis.setAnalyzer(cameraExecutor, new ImageAnalysis.Analyzer() {
+                    @Override
+                    public void analyze(@NonNull ImageProxy image) {
+                        long currentTime = System.currentTimeMillis();
+                        // 节流：每 250ms (每秒4帧) 传一次实时流，且上一帧已经传输完毕
+                        if (currentTime - lastAnalyzeTime > 250 && !isAnalyzing) {
+                            isAnalyzing = true;
+                            lastAnalyzeTime = currentTime;
+
+                            // 转为 Bitmap 并进行极度压缩，保证实时性
+                            Bitmap bitmap = imageProxyToBitmap(image);
+                            if (bitmap != null) {
+                                // 实时上传评分（轻量压缩）
+                                uploadLiveFrameForDrawing(bitmap);
+                            }
+                        }
+                        // 必须关闭，否则 CameraX 会卡死不发新帧
+                        image.close();
+                    }
+                });
+
+                // 选择摄像头
                 CameraSelector cameraSelector = new CameraSelector.Builder()
                         .requireLensFacing(cameraLensFacing)
                         .build();
 
+                // 解绑所有
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture);
+                // 同时绑定三个用例
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
                 Log.e(TAG, "启动相机失败", e);
                 runOnUiThread(() -> Toast.makeText(this, "相机启动失败", Toast.LENGTH_SHORT).show());
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+//    添加实时流上传方法
+private void uploadLiveFrameForDrawing(Bitmap bitmap) {
+    // 实时流不需要太高分辨率，压到最大 320 像素，大大提升传输和后端 AI 推理速度
+    int maxDimension = 320;
+    float scale = Math.min((float) maxDimension / bitmap.getWidth(), (float) maxDimension / bitmap.getHeight());
+    if (scale < 1) {
+        bitmap = Bitmap.createScaledBitmap(bitmap, Math.round(bitmap.getWidth() * scale), Math.round(bitmap.getHeight() * scale), true);
+    }
+
+    ByteArrayOutputStream stream = new ByteArrayOutputStream();
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 45, stream); // 质量压到 45%
+    byte[] imageBytes = stream.toByteArray();
+
+    MultipartBody.Builder builder = new MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("image", "live_frame.jpg", RequestBody.create(MediaType.parse("image/jpeg"), imageBytes));
+    // 如果后端画关节不需要知道当前是什么动作，甚至不用传 pose_name
+
+    Request request = new Request.Builder()
+            .url(BASE_URL + "/pose/draw_joints") // 💡 建议：让后端提供一个专门返回骨骼坐标的轻量接口
+            .post(builder.build())
+            .build();
+
+    okHttpClient.newCall(request).enqueue(new Callback() {
+        @Override
+        public void onFailure(@NonNull Call call, @NonNull IOException e) {
+            Log.e(TAG, "实时帧传输失败", e);
+            isAnalyzing = false; // 释放锁
+        }
+
+        @Override
+        public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+            try {
+                if (response.isSuccessful() && response.body() != null) {
+                    String responseBody = response.body().string();
+
+                    // 在 UI 线程绘制关节
+                    runOnUiThread(() -> {
+                        drawSkeletonOnOverlay(responseBody);
+                    });
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "解析实时帧返回失败", e);
+            } finally {
+                response.close();
+                isAnalyzing = false; // 【必须】释放锁，允许下一帧进入
+            }
+        }
+    });
+}
+    /**
+     * 解析后端骨骼点 JSON，更新 SkeletonOverlayView
+     * 期望格式：
+     * {
+     *   "code": 200,
+     *   "joints": [{"x": 0.45, "y": 0.32}, {"x": 0.55, "y": 0.32}, ...]
+     * }
+     */
+    private void drawSkeletonOnOverlay(String responseBody) {
+        try {
+            JSONObject json = new JSONObject(responseBody);
+            int code = json.optInt("code", -1);
+
+            // 没检测到人时清空骨骼
+            if (code != 200 || !json.has("joints")) {
+                skeletonOverlayView.clearKeypoints();
+                return;
+            }
+
+            JSONArray jointsArray = json.getJSONArray("joints");
+            List<PointF> points = new ArrayList<>();
+
+            for (int i = 0; i < jointsArray.length(); i++) {
+                JSONObject joint = jointsArray.getJSONObject(i);
+                float x = (float) joint.getDouble("x");
+                float y = (float) joint.getDouble("y");
+                points.add(new PointF(x, y));
+            }
+
+            skeletonOverlayView.updateKeypoints(points);
+
+        } catch (JSONException e) {
+            Log.e(TAG, "骨骼点解析失败", e);
+            skeletonOverlayView.clearKeypoints();
+        }
     }
 
     private void takePhotoAndUpload() {
@@ -505,6 +754,19 @@ public class MainActivity extends AppCompatActivity {
                     Toast.makeText(this, "得分 " + score + " 分，继续努力！", Toast.LENGTH_SHORT).show();
                 }
                 return;
+
+                // ★ 新增：解析骨骼关键点并绘制
+                if (data.has("landmarks")) {
+                    JSONArray landmarks = data.getJSONArray("landmarks");
+                    List<PointF> points = new ArrayList<>();
+                    for (int i = 0; i < landmarks.length(); i++) {
+                        JSONObject joint = landmarks.getJSONObject(i);
+                        float x = (float) joint.getDouble("x");
+                        float y = (float) joint.getDouble("y");
+                        points.add(new PointF(x, y));
+                    }
+                    skeletonOverlayView.updateKeypoints(points);
+                }
             }
 
             // 兼容简单格式
