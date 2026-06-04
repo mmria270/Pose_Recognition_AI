@@ -16,22 +16,22 @@ app.add_middleware(
 @app.get("/pose/list")
 def get_pose_list():
     return {
-        "poses": [
-            "Both Hands Up",
-            "Squat",
-            "T-Pose",
-            "Lunge Left",
-            "Lunge Right",
-            "Balance Left Leg",
-            "Balance Right Leg",
-            "Bow",
-            "Hands on Hips",
-            "Side Raise Left",
-            "Touch Shoulders",
-            "High Knee Left",
-            "High Knee Right",
-            "Streamline Pose"
-        ]
+        "poses" : [
+    "Both Hands Up",
+    "Punch Right",
+    "Squat",
+    "T-Pose",
+    "Lunge Right",
+    "Balance Right Leg",
+    "Bow",
+    "Hands on Hips",
+    "Touch Shoulders",
+    "Heart Above Head",
+    "Side Bow Fist Pose",
+    "Buriburi Beam",
+    "Ultraman Beam",
+    "Cowboy Tip"
+]
     }
 
 
@@ -52,6 +52,31 @@ async def check_pose(
     print("本次打分结果：", res)
     return res
 
+# 新增骨骼关键点接口
+@app.post("/pose/draw_joints")
+async def draw_joints(image: UploadFile = File(...)):
+    import numpy as np
+    import cv2
+    import mediapipe as mp
+    from pose_scorer import _detector
 
+    image_bytes = await image.read()
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    result = _detector.detect(mp_img)
+
+    if not result.pose_landmarks:
+        return {"code": 201, "msg": "no person", "joints": []}
+
+    lm = result.pose_landmarks[0]
+    joints = [
+        {"x": round(lm[i].x, 4), "y": round(lm[i].y, 4)}
+        for i in range(33)
+    ]
+
+    return {"code": 200, "joints": joints}
 
 #  uvicorn main:app --reload --host 0.0.0.0
