@@ -4,6 +4,8 @@ pose_scorer.py
 实时预览:     python pose_scorer.py
 快捷键: A/D 切换动作, P 打印角度, ESC 退出
 """
+import random
+
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -36,6 +38,7 @@ def _init_detector(num_poses=3):
 
 # 全局 detector，import 本模块时自动初始化
 _detector = _init_detector()
+_live_detector = _init_detector()
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +71,11 @@ POSES = {
         {"name": "L-Shoulder",   "joints": (13,11,23), "target":160, "tol":30, "w":0.25},
         {"name": "R-Shoulder",   "joints": (14,12,24), "target":160, "tol":30, "w":0.25},
     ],
+    "Punch Right": [
+            {"name": "R-Arm-Out",    "joints": (16,14,12), "target":170, "tol":20, "w":0.65},
+            {"name": "R-Forward",    "joints": (14,12,24), "target": 75, "tol":25, "w":0.20},
+            {"name": "L-Elbow-Pull", "joints": (11,13,15), "target": 60, "tol":25, "w":0.15},
+    ],
     "Squat": [
         {"name": "L-Knee",       "joints": (23,25,27), "target": 95, "tol":35, "w":0.4},
         {"name": "R-Knee",       "joints": (24,26,28), "target": 95, "tol":35, "w":0.4},
@@ -79,19 +87,10 @@ POSES = {
         {"name": "L-Shoulder",   "joints": (13,11,23), "target": 90, "tol":20, "w":0.25},
         {"name": "R-Shoulder",   "joints": (14,12,24), "target": 90, "tol":20, "w":0.25},
     ],
-    "Lunge Left": [
-        {"name": "L-Knee",       "joints": (23,25,27), "target": 90, "tol":35, "w":0.4},
-        {"name": "R-Leg",        "joints": (24,26,28), "target":165, "tol":25, "w":0.4},
-        {"name": "Torso",        "joints": (11,23,25), "target":165, "tol":25, "w":0.2},
-    ],
     "Lunge Right": [
         {"name": "R-Knee",       "joints": (24,26,28), "target": 90, "tol":35, "w":0.4},
         {"name": "L-Leg",        "joints": (23,25,27), "target":165, "tol":25, "w":0.4},
         {"name": "Torso",        "joints": (12,24,26), "target":165, "tol":25, "w":0.2},
-    ],
-    "Balance Left Leg": [
-        {"name": "L-Leg",        "joints": (23,25,27), "target":175, "tol":20, "w":0.5},
-        {"name": "R-Lift",       "joints": (24,26,28), "target": 85, "tol":30, "w":0.5},
     ],
     "Balance Right Leg": [
         {"name": "R-Leg",        "joints": (24,26,28), "target":175, "tol":20, "w":0.5},
@@ -102,47 +101,86 @@ POSES = {
         {"name": "Knees",        "joints": (23,25,27), "target":170, "tol":20, "w":0.4},
     ],
     "Hands on Hips": [
-        {"name": "L-Elbow",      "joints": (15,13,11), "target": 90, "tol":30, "w":0.4},
-        {"name": "R-Elbow",      "joints": (16,14,12), "target": 90, "tol":30, "w":0.4},
-        {"name": "Torso",        "joints": (11,23,25), "target":175, "tol":15, "w":0.2},
-    ],
-    "Side Raise Left": [
-        {"name": "L-Elbow",      "joints": (15,13,11), "target":175, "tol":25, "w":0.5},
-        {"name": "L-Abduction",  "joints": (13,11,23), "target": 85, "tol":30, "w":0.5},
+        {"name": "L-Elbow",      "joints": (15,13,11), "target": 90, "tol":30, "w":0.25},
+        {"name": "R-Elbow",      "joints": (16,14,12), "target": 90, "tol":30, "w":0.25},
+        {"name": "Torso",        "joints": (11,23,25), "target":175, "tol":15, "w":0.5},
     ],
     "Touch Shoulders": [
         {"name": "L-Elbow-Flex", "joints": (15,13,11), "target": 40, "tol":25, "w":0.5},
         {"name": "R-Elbow-Flex", "joints": (16,14,12), "target": 40, "tol":25, "w":0.5},
     ],
-    "High Knee Left": [
-        {"name": "L-Hip-Flex",   "joints": (11,23,25), "target": 85, "tol":25, "w":0.5},
-        {"name": "R-Stand-Leg",  "joints": (24,26,28), "target":175, "tol":15, "w":0.5},
+    "Heart Above Head": [
+        # 双臂从髋往上举：髋→肩→肘角度大
+        {"name": "L-Shoulder-Up", "joints": (23, 11, 13), "target": 160, "tol": 25, "w": 0.3},
+        {"name": "R-Shoulder-Up", "joints": (24, 12, 14), "target": 160, "tol": 25, "w": 0.3},
+
+        # 双肘弯曲，形成爱心弧度（不能伸直）
+        {"name": "L-Elbow-Bend",  "joints": (11, 13, 15), "target": 115, "tol": 30, "w": 0.1},
+        {"name": "R-Elbow-Bend",  "joints": (12, 14, 16), "target": 115, "tol": 30, "w": 0.3},
+
     ],
-    "High Knee Right": [
-        {"name": "R-Hip-Flex",   "joints": (12,24,26), "target": 85, "tol":25, "w":0.5},
-        {"name": "L-Stand-Leg",  "joints": (23,25,27), "target":175, "tol":15, "w":0.5},
+    "Side Bow Fist Pose": [
+        # 双肘弯曲收到胸前（抱拳核心）
+        {"name": "L-Elbow-Cross", "joints": (11, 13, 15), "target": 70,  "tol": 30, "w": 0.1},
+        {"name": "R-Elbow-Cross", "joints": (12, 14, 16), "target": 70,  "tol": 30, "w": 0.40},
+
+        # 膝盖微弯，重心下沉（耍帅感）
+        {"name": "L-Knee-Soft",  "joints": (23, 25, 27), "target": 155, "tol": 20, "w": 0.25},
+        {"name": "R-Knee-Soft",  "joints": (24, 26, 28), "target": 155, "tol": 20, "w": 0.25},
     ],
-    "Streamline Pose": [
-        {"name": "L-Arm",        "joints": (15,13,11), "target":175, "tol":15, "w":0.25},
-        {"name": "R-Arm",        "joints": (16,14,12), "target":175, "tol":15, "w":0.25},
-        {"name": "L-Shoulder-Up","joints": (13,11,23), "target":170, "tol":20, "w":0.25},
-        {"name": "R-Shoulder-Up","joints": (14,12,24), "target":170, "tol":20, "w":0.25},
+    "Buriburi Beam": [
+        {"name": "L-Arm-Straight", "joints": (15, 13, 11), "target": 170, "tol": 20, "w": 0.35},
+        {"name": "L-Shoulder-Up",  "joints": (13, 11, 23), "target": 130, "tol": 25, "w": 0.25},
+        {"name": "R-Elbow-Bend",   "joints": (12, 14, 16), "target":  55, "tol": 25, "w": 0.25},
+        {"name": "R-Shoulder-Up",  "joints": (14, 12, 24), "target": 120, "tol": 25, "w": 0.15},
+    ],
+    "Ultraman Beam": [
+        {"name": "L-Elbow-Cross",  "joints": (11, 13, 15), "target":  65, "tol": 25, "w": 0.4},
+        {"name": "R-Elbow-Cross",  "joints": (12, 14, 16), "target":  65, "tol": 25, "w": 0.5},
+        {"name": "L-Arm-In",       "joints": (23, 11, 13), "target":  55, "tol": 25, "w": 0.05},
+        {"name": "R-Arm-In",       "joints": (24, 12, 14), "target":  55, "tol": 25, "w": 0.05},
+    ],
+    "Cowboy Tip": [
+        {"name": "R-Elbow-Bend",   "joints": (12, 14, 16), "target":  80, "tol": 25, "w": 0.30},
+        {"name": "R-Shoulder-Up",  "joints": (14, 12, 24), "target": 100, "tol": 25, "w": 0.60},
+        {"name": "R-Wrist-High",   "joints": (0,  12, 16), "target": 145, "tol": 30, "w": 0.05},
+        {"name": "L-Elbow-Hip",    "joints": (15, 13, 11), "target":  90, "tol": 30, "w": 0.05},
     ],
 }
 
 POSE_KEYS = list(POSES.keys())
 
-# ── 内部评分（供预览用）──────────────────────────────────────────────────────
+# ── 共享评分（预览和后端统一使用）─────────────────────────────────────────────
+
+def _compute_joint_scores(lm, pose_key):
+    """共享评分核心：tol×1.5 容差 + 随机加分，预览和接口一致"""
+    total = 0.0
+    joint_detail = []
+    for cfg in POSES[pose_key]:
+        a, b, c_idx = cfg["joints"]
+        ang = calc_angle(lm_xy(lm, a), lm_xy(lm, b), lm_xy(lm, c_idx))
+        s = angle_score(ang, cfg["target"], cfg["tol"] * 1.5)
+        total += s * cfg["w"]
+        joint_detail.append({
+            "joint_name":   cfg["name"],
+            "joint_points": list(cfg["joints"]),
+            "actual_angle": round(ang, 1),
+            "target_angle": cfg["target"],
+            "tolerance":    cfg["tol"],
+            "single_score": round(s, 1),
+            "weight":       cfg["w"],
+        })
+    bonus = random.uniform(10, 20)
+    total = min(100.0, total + bonus)
+    return round(total, 1), joint_detail
+
 
 def _score_pose(lm, pose_key):
-    total, details = 0.0, []
-    for c in POSES[pose_key]:
-        a, b, cc = c["joints"]
-        ang = calc_angle(lm_xy(lm, a), lm_xy(lm, b), lm_xy(lm, cc))
-        s   = angle_score(ang, c["target"], c["tol"])
-        total += s * c["w"]
-        details.append((c["name"], ang, c["target"], s))
-    return round(total, 1), details
+    """预览用包装：从共享评分结果中提取元组供 _draw_panel 使用"""
+    total, joint_detail = _compute_joint_scores(lm, pose_key)
+    details = [(d["joint_name"], d["actual_angle"], d["target_angle"], d["single_score"])
+               for d in joint_detail]
+    return total, details
 
 # ── 后端入口 ──────────────────────────────────────────────────────────────────
 
@@ -192,23 +230,7 @@ def analyze_image(image_input, pose_name: str) -> dict:
                          "has_human": False, "landmarks": [], "joint_detail": []}}
 
     lm          = result.pose_landmarks[0]
-    total_score = 0.0
-    joint_detail = []
-
-    for cfg in POSES[pose_name]:
-        a, b, c_idx = cfg["joints"]
-        ang      = calc_angle(lm_xy(lm, a), lm_xy(lm, b), lm_xy(lm, c_idx))
-        single_s = angle_score(ang, cfg["target"], cfg["tol"])
-        total_score += single_s * cfg["w"]
-        joint_detail.append({
-            "joint_name":   cfg["name"],
-            "joint_points": list(cfg["joints"]),
-            "actual_angle": round(ang, 1),
-            "target_angle": cfg["target"],
-            "tolerance":    cfg["tol"],
-            "single_score": round(single_s, 1),
-            "weight":       cfg["w"],
-        })
+    total_score, joint_detail = _compute_joint_scores(lm, pose_name)
 
     landmarks_all = [
         {"index": i, "x": round(lm[i].x,4), "y": round(lm[i].y,4), "z": round(lm[i].z,4)}
@@ -220,7 +242,7 @@ def analyze_image(image_input, pose_name: str) -> dict:
         "msg":  "success",
         "data": {
             "pose_name":   pose_name,
-            "total_score": round(total_score, 1),
+            "total_score": total_score,
             "has_human":   True,
             "landmarks":   landmarks_all,
             "joint_detail": joint_detail,
