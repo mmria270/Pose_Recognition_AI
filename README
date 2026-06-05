@@ -1,0 +1,2 @@
+pose_scorer.py用于供后端调用，运行单文件也可单独测试模型识别动作准确度；
+test_mediapipe.py和test_yolo.py是一开始用于测试两个模型的，仅为两个小测试demo。
